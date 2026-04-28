@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from livekit.agents import APIConnectionError, APIStatusError, APITimeoutError, llm
 from livekit.agents.llm import (
@@ -53,6 +53,22 @@ class _LLMOptions:
 
 
 @dataclass
+class ProviderToolCalledEvent:
+    """Emitted when a Mistral provider tool (web search, document library, etc.) is called."""
+
+    name: str
+    arguments: str
+
+
+@dataclass
+class ProviderToolExecutedEvent:
+    """Emitted when a Mistral provider tool (web search, document library, etc.) completes."""
+
+    name: str
+    arguments: str
+
+
+@dataclass
 class _PendingFunctionCall:
     """Accumulates streamed function call deltas."""
 
@@ -62,7 +78,7 @@ class _PendingFunctionCall:
     arguments: str = ""
 
 
-class LLM(llm.LLM):
+class LLM(llm.LLM[Literal["provider_tool_called", "provider_tool_executed"]]):
     def __init__(
         self,
         *,
@@ -186,7 +202,8 @@ class LLM(llm.LLM):
             completion_args["random_seed"] = self._opts.random_seed
 
         resolved_tool_choice = tool_choice if is_given(tool_choice) else self._opts.tool_choice
-        if resolved_tool_choice is not None:
+        has_any_tools = bool(tools)
+        if resolved_tool_choice is not None and has_any_tools:
             has_provider_tools = any(isinstance(t, MistralTool) for t in (tools or []))
             if isinstance(resolved_tool_choice, dict) or resolved_tool_choice == "required":
                 completion_args["tool_choice"] = "auto" if has_provider_tools else "required"
@@ -403,6 +420,10 @@ class LLMStream(llm.LLMStream):
 
         if isinstance(data, ToolExecutionStartedEvent):
             self._provider_tool_args[data.id] = data.arguments
+            self._mistral_llm.emit(
+                "provider_tool_called",
+                ProviderToolCalledEvent(name=data.name, arguments=data.arguments),
+            )
 
         elif isinstance(data, ToolExecutionDeltaEvent):
             if data.id not in self._provider_tool_args:
@@ -414,6 +435,10 @@ class LLMStream(llm.LLMStream):
             logger.debug(
                 "executed provider tool",
                 extra={"function": data.name, "arguments": args, "info": data.info},
+            )
+            self._mistral_llm.emit(
+                "provider_tool_executed",
+                ProviderToolExecutedEvent(name=data.name, arguments=args),
             )
 
         return chunks
